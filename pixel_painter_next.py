@@ -55,6 +55,7 @@ AREA_MIN_FRAC = 0.35    # 面积小于中位数 35% 的块 = 被 UI 遮挡的残
 AREA_MAX_FRAC = 1.5     # 面积大于中位数 1.5 倍的块 = 背景大块，忽略
 CONT_DIST_MIN = 1.2
 CONT_DIST_MAX = 1.8   # 收紧：间距过大不合并，避免拖画把空隙填成"粘连一排"
+ENABLE_DRAG = False    # 拖画开关：True=相邻像素合并一次拖画（快，但有空隙时会把间隙画成线）；False=逐点画（安全，默认）
 MIN_CONT_COUNT = 5
 FULLSCREEN = True
 WIN_TITLE = "Paint the world"
@@ -304,30 +305,33 @@ def detect(mode='mono'):
                 if a>=base*AREA_MAX_FRAC: continue
             filt.append((x,y,w,h))
 
-        # 连续矩形分组
-        rows={}
-        for r in filt:
-            k=r[1]//10
-            rows.setdefault(k,[]).append(r)
-        groups=[]
-        for k in sorted(rows):
-            rs=sorted(rows[k],key=lambda r:r[0])
-            g=[rs[0]]
-            for i in range(1,len(rs)):
-                gap=rs[i][0]-(rs[i-1][0]+rs[i-1][2])
-                d=gap/rs[i-1][2] if rs[i-1][2]>0 else gap
-                # 宽度差异过大（如被遮挡的残片）不合并，避免拖画填出"粘连一排"
-                w_ok=abs(rs[i][2]-rs[i-1][2])<=0.35*max(rs[i][2],rs[i-1][2])
-                if CONT_DIST_MIN<=d<=CONT_DIST_MAX and w_ok: g.append(rs[i])
-                else: groups.append(g); g=[rs[i]]
-            groups.append(g)
-
         targets=[]
-        for g in groups:
-            if len(g)==1:
-                x,y,w,h=g[0]; targets.append(('s',x+w//2,y+h//2))
-            else:
-                f,l=g[0],g[-1]; targets.append(('c',f[0]+f[2]//2,f[1]+f[3]//2,l[0]+l[2]//2,l[1]+l[3]//2))
+        if ENABLE_DRAG:
+            # 连续矩形分组（拖画提速；仅当像素真正紧密相邻时安全）
+            rows={}
+            for r in filt:
+                k=r[1]//10
+                rows.setdefault(k,[]).append(r)
+            groups=[]
+            for k in sorted(rows):
+                rs=sorted(rows[k],key=lambda r:r[0])
+                g=[rs[0]]
+                for i in range(1,len(rs)):
+                    gap=rs[i][0]-(rs[i-1][0]+rs[i-1][2])
+                    d=gap/rs[i-1][2] if rs[i-1][2]>0 else gap
+                    w_ok=abs(rs[i][2]-rs[i-1][2])<=0.35*max(rs[i][2],rs[i-1][2])
+                    if CONT_DIST_MIN<=d<=CONT_DIST_MAX and w_ok: g.append(rs[i])
+                    else: groups.append(g); g=[rs[i]]
+                groups.append(g)
+            for g in groups:
+                if len(g)==1:
+                    x,y,w,h=g[0]; targets.append(('s',x+w//2,y+h//2))
+                else:
+                    f,l=g[0],g[-1]; targets.append(('c',f[0]+f[2]//2,f[1]+f[3]//2,l[0]+l[2]//2,l[1]+l[3]//2))
+        else:
+            # 逐点画（默认）：不做任何拖画合并，彻底杜绝把空隙画成一条线
+            for x,y,w,h in filt:
+                targets.append(('s',x+w//2,y+h//2))
         targets.sort(key=lambda p: (p[2]//20,p[1]))
         s['targets']=targets[:MAX_TARGETS]
         return True
@@ -458,9 +462,15 @@ def find_color_in_pick(c, mode='full'):
         tb=(c[2],c[1],c[0])
         mask=cv2.inRange(img,np.array([max(0,cc-TOLERANCE) for cc in tb]),np.array([min(255,cc+TOLERANCE) for cc in tb]))
         mask=cv2.morphologyEx(cv2.morphologyEx(mask,cv2.MORPH_CLOSE,np.ones((3,3),np.uint8)),cv2.MORPH_OPEN,np.ones((3,3),np.uint8))
-        cont,_=cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in cont:
-            if cv2.contourArea(cnt)>500:
+        cont,_=cv2.findContours(mask,cv2.RETR_LIST,cv2.CHAIN_APPROX_SIMPLE)   # RETR_LIST 才能拿到被灰框隔离的按钮（外层会被底色占掉）
+        areas=[(cv2.contourArea(cnt),cnt) for cnt in cont]
+        areas.sort(reverse=True)
+        if not areas: return None
+        # 取色板底色是大片同色背景：若最大块明显大于其余（>3倍），判定为底色并排除
+        if len(areas)>1 and areas[0][0] > 3*areas[1][0]:
+            areas=areas[1:]
+        for a,cnt in areas:
+            if a>500:
                 rx,ry,rw,rh=cv2.boundingRect(cnt); return (x+rx+rw//2,y+ry+rh//2)
         return None
     except: return None
@@ -502,8 +512,15 @@ def full_color_mode(mode):
             continue
 
         if pos:
-            logging.info(f"{cn} - 取色")
-            pyautogui.moveTo(pos[0],pos[1],duration=MOUSE_DURATION); pyautogui.click(); time.sleep(0.05)
+            logging.info(f"{cn} - 取色 @ {pos}")
+            focus_win()                                     # 先确保游戏窗口激活（窗口化模式有效）
+            time.sleep(0.1)
+            pyautogui.moveTo(pos[0],pos[1],duration=0.15)   # 慢移过去，避免瞬移点击失效
+            time.sleep(0.08)                                # 先悬停一下，让按钮可点击
+            pyautogui.click()
+            time.sleep(0.15)
+            pyautogui.click()                               # 双击：第一击确保激活/聚焦，第二击真正选中
+            time.sleep(0.4)                                 # 等游戏完成颜色切换，防止用上一颜色误涂
 
         save_data(color_rgb=c, idx=ci if mode!='free' else None, free_idx=ci if mode=='free' else None)
         focus_win()
@@ -674,9 +691,10 @@ def on_press(key):
         if key==HK['q'] and s['mode']=='mono':
             p=pyautogui.position()
             try:
-                hc=pyautogui.pixel(p.x,p.y); rc=corrector.fix(hc); global TARGET_COLOR_RGB; TARGET_COLOR_RGB=rc
-                save_data(color_rgb=rc); _,cn=closest_color(rc)
-                logging.info(f"取色: {hc} -> {rc} ({cn})"); gui_status(f"颜色: {cn}")
+                hc=pyautogui.pixel(p.x,p.y)
+                global TARGET_COLOR_RGB; TARGET_COLOR_RGB=hc   # 用屏幕原色匹配，取到什么画什么，避免校正后灰白粘连
+                save_data(color_rgb=hc); _,cn=closest_color(hc)
+                logging.info(f"取色: {hc} ({cn})"); gui_status(f"颜色: {cn}")
             except Exception as e: logging.error(f"取色失败: {e}")
             return
 
