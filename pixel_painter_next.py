@@ -55,6 +55,7 @@ AREA_MIN_FRAC = 0.35    # 面积小于中位数 35% 的块 = 被 UI 遮挡的残
 AREA_MAX_FRAC = 1.5     # 面积大于中位数 1.5 倍的块 = 背景大块，忽略
 CONT_DIST_MIN = 1.2
 CONT_DIST_MAX = 1.8   # 收紧：间距过大不合并，避免拖画把空隙填成"粘连一排"
+ENABLE_DRAG = False    # 拖画开关：True=相邻像素合并一次拖画（快，但有空隙时会把间隙画成线）；False=逐点画（安全，默认）
 MIN_CONT_COUNT = 5
 FULLSCREEN = True
 WIN_TITLE = "Paint the world"
@@ -304,30 +305,33 @@ def detect(mode='mono'):
                 if a>=base*AREA_MAX_FRAC: continue
             filt.append((x,y,w,h))
 
-        # 连续矩形分组
-        rows={}
-        for r in filt:
-            k=r[1]//10
-            rows.setdefault(k,[]).append(r)
-        groups=[]
-        for k in sorted(rows):
-            rs=sorted(rows[k],key=lambda r:r[0])
-            g=[rs[0]]
-            for i in range(1,len(rs)):
-                gap=rs[i][0]-(rs[i-1][0]+rs[i-1][2])
-                d=gap/rs[i-1][2] if rs[i-1][2]>0 else gap
-                # 宽度差异过大（如被遮挡的残片）不合并，避免拖画填出"粘连一排"
-                w_ok=abs(rs[i][2]-rs[i-1][2])<=0.35*max(rs[i][2],rs[i-1][2])
-                if CONT_DIST_MIN<=d<=CONT_DIST_MAX and w_ok: g.append(rs[i])
-                else: groups.append(g); g=[rs[i]]
-            groups.append(g)
-
         targets=[]
-        for g in groups:
-            if len(g)==1:
-                x,y,w,h=g[0]; targets.append(('s',x+w//2,y+h//2))
-            else:
-                f,l=g[0],g[-1]; targets.append(('c',f[0]+f[2]//2,f[1]+f[3]//2,l[0]+l[2]//2,l[1]+l[3]//2))
+        if ENABLE_DRAG:
+            # 连续矩形分组（拖画提速；仅当像素真正紧密相邻时安全）
+            rows={}
+            for r in filt:
+                k=r[1]//10
+                rows.setdefault(k,[]).append(r)
+            groups=[]
+            for k in sorted(rows):
+                rs=sorted(rows[k],key=lambda r:r[0])
+                g=[rs[0]]
+                for i in range(1,len(rs)):
+                    gap=rs[i][0]-(rs[i-1][0]+rs[i-1][2])
+                    d=gap/rs[i-1][2] if rs[i-1][2]>0 else gap
+                    w_ok=abs(rs[i][2]-rs[i-1][2])<=0.35*max(rs[i][2],rs[i-1][2])
+                    if CONT_DIST_MIN<=d<=CONT_DIST_MAX and w_ok: g.append(rs[i])
+                    else: groups.append(g); g=[rs[i]]
+                groups.append(g)
+            for g in groups:
+                if len(g)==1:
+                    x,y,w,h=g[0]; targets.append(('s',x+w//2,y+h//2))
+                else:
+                    f,l=g[0],g[-1]; targets.append(('c',f[0]+f[2]//2,f[1]+f[3]//2,l[0]+l[2]//2,l[1]+l[3]//2))
+        else:
+            # 逐点画（默认）：不做任何拖画合并，彻底杜绝把空隙画成一条线
+            for x,y,w,h in filt:
+                targets.append(('s',x+w//2,y+h//2))
         targets.sort(key=lambda p: (p[2]//20,p[1]))
         s['targets']=targets[:MAX_TARGETS]
         return True
